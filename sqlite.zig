@@ -145,10 +145,10 @@ pub const Db = struct {
     /// The statement returned is only compatible with the number of bind markers in the input query.
     /// This is done because we type check the bind parameters when executing the statement later.
     ///
-    pub fn prepare(self: *Self, comptime query: []const u8, comptime mappings: anytype) !Statement(.{}, ParsedQuery.from(query), @TypeOf(mappings), mappings) {
+    pub fn prepare(self: *Self, comptime query: []const u8, comptime mappings: anytype) !Statement(.{}, ParsedQuery.from(query), mappings) {
         @setEvalBranchQuota(10000);
         const parsed_query = ParsedQuery.from(query);
-        return Statement(.{}, comptime parsed_query, @TypeOf(mappings), mappings).prepare(self, 0);
+        return Statement(.{}, comptime parsed_query, mappings).prepare(self, 0);
     }
 
     /// rowsAffected returns the number of rows affected by the last statement executed.
@@ -506,7 +506,7 @@ pub const StatementOptions = struct {};
 ///
 /// Look at aach function for more complete documentation.
 ///
-pub fn Statement(comptime opts: StatementOptions, comptime query: ParsedQuery, comptime MappingsType: type, comptime mappings: MappingsType) type {
+pub fn Statement(comptime opts: StatementOptions, comptime query: ParsedQuery, comptime mappings: anytype) type {
     return struct {
         const Self = @This();
 
