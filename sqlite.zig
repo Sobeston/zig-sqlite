@@ -179,7 +179,7 @@ pub const Db = struct {
 ///     }
 ///
 /// The iterator _must not_ outlive the statement.
-pub fn Iterator(comptime Type: type, comptime MappingsType: type, comptime mappings: MappingsType) type {
+pub fn Iterator(comptime Type: type, comptime mappings: anytype) type {
     return struct {
         const Self = @This();
 
@@ -656,10 +656,10 @@ pub fn Statement(comptime opts: StatementOptions, comptime query: ParsedQuery, c
         /// in the input query string.
         ///
         /// The iterator _must not_ outlive the statement.
-        pub fn iterator(self: *Self, comptime Type: type, values: anytype) !Iterator(Type, @TypeOf(mappings), mappings) {
+        pub fn iterator(self: *Self, comptime Type: type, values: anytype) !Iterator(Type, mappings) {
             self.bind(values);
 
-            var res: Iterator(Type, @TypeOf(mappings), mappings) = undefined;
+            var res: Iterator(Type, mappings) = undefined;
             res.stmt = self.stmt;
 
             return res;
