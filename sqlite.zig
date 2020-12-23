@@ -112,22 +112,22 @@ pub const Db = struct {
             break :blk try std.fmt.bufPrint(&buf, "PRAGMA {}", .{name});
         };
 
-        var stmt = try self.prepare(query);
+        var stmt = try self.prepare(query, TypeMappings(0, 0){});
         defer stmt.deinit();
 
         return try stmt.one(Type, options, .{});
     }
 
     /// exec is a convenience function which prepares a statement and executes it directly.
-    pub fn exec(self: *Self, comptime query: []const u8, values: anytype) !void {
-        var stmt = try self.prepare(query);
+    pub fn exec(self: *Self, comptime query: []const u8, comptime mappings: anytype, values: anytype) !void {
+        var stmt = try self.prepare(query, mappings);
         defer stmt.deinit();
         try stmt.exec(values);
     }
 
     /// one is a convenience function which prepares a statement and reads a single row from the result set.
-    pub fn one(self: *Self, comptime Type: type, comptime query: []const u8, options: anytype, values: anytype) !?Type {
-        var stmt = try self.prepare(query);
+    pub fn one(self: *Self, comptime Type: type, comptime query: []const u8, comptime mappings: anytype, options: anytype, values: anytype) !?Type {
+        var stmt = try self.prepare(query, mappings);
         defer stmt.deinit();
         return try stmt.one(Type, options, values);
     }
@@ -145,10 +145,10 @@ pub const Db = struct {
     /// The statement returned is only compatible with the number of bind markers in the input query.
     /// This is done because we type check the bind parameters when executing the statement later.
     ///
-    pub fn prepare(self: *Self, comptime query: []const u8) !Statement(.{}, ParsedQuery.from(query)) {
+    pub fn prepare(self: *Self, comptime query: []const u8, comptime mappings: anytype) !Statement(.{}, ParsedQuery.from(query), @TypeOf(mappings), mappings) {
         @setEvalBranchQuota(10000);
         const parsed_query = ParsedQuery.from(query);
-        return Statement(.{}, comptime parsed_query).prepare(self, 0);
+        return Statement(.{}, comptime parsed_query, @TypeOf(mappings), mappings).prepare(self, 0);
     }
 
     /// rowsAffected returns the number of rows affected by the last statement executed.
@@ -179,7 +179,7 @@ pub const Db = struct {
 ///     }
 ///
 /// The iterator _must not_ outlive the statement.
-pub fn Iterator(comptime Type: type) type {
+pub fn Iterator(comptime Type: type, comptime MappingsType: type, comptime mappings: MappingsType) type {
     return struct {
         const Self = @This();
 
@@ -430,9 +430,22 @@ pub fn Iterator(comptime Type: type) type {
         //
         // TODO(vincent): add comptime checks for the fields/columns.
         fn readStruct(self: *Self, options: anytype) !Type {
-            var value: Type = undefined;
+            const type_info = @typeInfo(Type);
 
+            if (type_info.Struct.fields.len != mappings.columns.len) {
+                @compileError("number of column type mappings not equal to number of fields");
+            }
+
+            var value: Type = undefined;
             inline for (@typeInfo(Type).Struct.fields) |field, _i| {
+                const column_type_mapping = mappings.columns[_i];
+                switch (column_type_mapping) {
+                    .Typed => |typ| if (struct_field.field_type != typ) {
+                        @compileError("value type " ++ @typeName(field.field_type) ++ " is not the required column type " ++ @typeName(typ));
+                    },
+                    .Untyped => {},
+                }
+
                 const i = @as(usize, _i);
                 const field_type_info = @typeInfo(field.field_type);
 
@@ -493,7 +506,7 @@ pub const StatementOptions = struct {};
 ///
 /// Look at aach function for more complete documentation.
 ///
-pub fn Statement(comptime opts: StatementOptions, comptime query: ParsedQuery) type {
+pub fn Statement(comptime opts: StatementOptions, comptime query: ParsedQuery, comptime MappingsType: type, comptime mappings: MappingsType) type {
     return struct {
         const Self = @This();
 
@@ -564,12 +577,12 @@ pub fn Statement(comptime opts: StatementOptions, comptime query: ParsedQuery) t
             const StructType = @TypeOf(values);
             const StructTypeInfo = @typeInfo(StructType).Struct;
 
-            if (comptime query.nb_bind_markers != StructTypeInfo.fields.len) {
+            if (comptime mappings.bind_markers.len != StructTypeInfo.fields.len) {
                 @compileError("number of bind markers not equal to number of fields");
             }
 
             inline for (StructTypeInfo.fields) |struct_field, _i| {
-                const bind_marker = query.bind_markers[_i];
+                const bind_marker = mappings.bind_markers[_i];
                 switch (bind_marker) {
                     .Typed => |typ| if (struct_field.field_type != typ) {
                         @compileError("value type " ++ @typeName(struct_field.field_type) ++ " is not the bind marker type " ++ @typeName(typ));
@@ -643,10 +656,10 @@ pub fn Statement(comptime opts: StatementOptions, comptime query: ParsedQuery) t
         /// in the input query string.
         ///
         /// The iterator _must not_ outlive the statement.
-        pub fn iterator(self: *Self, comptime Type: type, values: anytype) !Iterator(Type) {
+        pub fn iterator(self: *Self, comptime Type: type, values: anytype) !Iterator(Type, @TypeOf(mappings), mappings) {
             self.bind(values);
 
-            var res: Iterator(Type) = undefined;
+            var res: Iterator(Type, @TypeOf(mappings), mappings) = undefined;
             res.stmt = self.stmt;
 
             return res;
@@ -766,11 +779,11 @@ fn addTestData(db: *Db) !void {
 
     // Create the tables
     inline for (AllDDL) |ddl| {
-        try db.exec(ddl, .{});
+        try db.exec(ddl, TypeMappings(0, 0){}, .{});
     }
 
     for (test_users) |user| {
-        try db.exec("INSERT INTO user(id, name, age, weight) VALUES(?{usize}, ?{[]const u8}, ?{usize}, ?{f32})", user);
+        try db.exec("INSERT INTO user(id, name, age, weight) VALUES(?{usize}, ?{[]const u8}, ?{usize}, ?{f32})", TypeMappings(0, 4).allUntyped(), user);
 
         const rows_inserted = db.rowsAffected();
         testing.expectEqual(@as(usize, 1), rows_inserted);
@@ -822,7 +835,7 @@ test "sqlite: statement exec" {
 
     // Test with a Blob struct
     {
-        try db.exec("INSERT INTO user(id, name, age) VALUES(?{usize}, ?{blob}, ?{u32})", .{
+        try db.exec("INSERT INTO user(id, name, age) VALUES(?{usize}, ?{blob}, ?{u32})", TypeMappings(0, 3).allUntyped(), .{
             .id = @as(usize, 200),
             .name = Blob{ .data = "hello" },
             .age = @as(u32, 20),
@@ -831,7 +844,7 @@ test "sqlite: statement exec" {
 
     // Test with a Text struct
     {
-        try db.exec("INSERT INTO user(id, name, age) VALUES(?{usize}, ?{text}, ?{u32})", .{
+        try db.exec("INSERT INTO user(id, name, age) VALUES(?{usize}, ?{text}, ?{u32})", TypeMappings(0, 3).allUntyped(), .{
             .id = @as(usize, 201),
             .name = Text{ .data = "hello" },
             .age = @as(u32, 20),
@@ -847,7 +860,7 @@ test "sqlite: read a single user into a struct" {
     try db.init(testing.allocator, .{ .mode = dbMode() });
     try addTestData(&db);
 
-    var stmt = try db.prepare("SELECT id, name, age, weight FROM user WHERE id = ?{usize}");
+    var stmt = try db.prepare("SELECT id, name, age, weight FROM user WHERE id = ?{usize}", TypeMappings(4, 1).allUntyped());
     defer stmt.deinit();
 
     var rows = try stmt.all(
@@ -870,6 +883,7 @@ test "sqlite: read a single user into a struct" {
                 age: usize,
             },
             "SELECT id, name, age FROM user WHERE id = ?{usize}",
+            TypeMappings(3, 1).allUntyped(),
             .{ .allocator = &arena.allocator },
             .{@as(usize, 20)},
         );
@@ -890,7 +904,7 @@ test "sqlite: read all users into a struct" {
     try db.init(testing.allocator, .{ .mode = dbMode() });
     try addTestData(&db);
 
-    var stmt = try db.prepare("SELECT id, name, age, weight FROM user");
+    var stmt = try db.prepare("SELECT id, name, age, weight FROM user", TypeMappings(4, 0).allUntyped());
     defer stmt.deinit();
 
     var rows = try stmt.all(
@@ -915,7 +929,7 @@ test "sqlite: read in an anonymous struct" {
     try db.init(testing.allocator, .{ .mode = dbMode() });
     try addTestData(&db);
 
-    var stmt = try db.prepare("SELECT id, name, name, age, id, weight FROM user WHERE id = ?{usize}");
+    var stmt = try db.prepare("SELECT id, name, name, age, id, weight FROM user WHERE id = ?{usize}", TypeMappings(6, 1).allUntyped());
     defer stmt.deinit();
 
     var row = try stmt.one(
@@ -949,7 +963,7 @@ test "sqlite: read in a Text struct" {
     try db.init(testing.allocator, .{ .mode = dbMode() });
     try addTestData(&db);
 
-    var stmt = try db.prepare("SELECT id, name, age FROM user WHERE id = ?{usize}");
+    var stmt = try db.prepare("SELECT id, name, age FROM user WHERE id = ?{usize}", TypeMappings(3, 1).allUntyped());
     defer stmt.deinit();
 
     var row = try stmt.one(
@@ -996,7 +1010,7 @@ test "sqlite: read a single text value" {
     inline for (types) |typ| {
         const query = "SELECT name FROM user WHERE id = ?{usize}";
 
-        var stmt: Statement(.{}, ParsedQuery.from(query)) = try db.prepare(query);
+        var stmt = try db.prepare(query, TypeMappings(1, 1).allUntyped());
         defer stmt.deinit();
 
         const name = try stmt.one(
@@ -1046,8 +1060,7 @@ test "sqlite: read a single integer value" {
     inline for (types) |typ| {
         const query = "SELECT age FROM user WHERE id = ?{usize}";
 
-        @setEvalBranchQuota(5000);
-        var stmt: Statement(.{}, ParsedQuery.from(query)) = try db.prepare(query);
+        var stmt = try db.prepare(query, TypeMappings(1, 1).allUntyped());
         defer stmt.deinit();
 
         var age = try stmt.one(typ, .{}, .{ .id = @as(usize, 20) });
@@ -1064,7 +1077,7 @@ test "sqlite: read a single value into void" {
 
     const query = "SELECT age FROM user WHERE id = ?{usize}";
 
-    var stmt: Statement(.{}, ParsedQuery.from(query)) = try db.prepare(query);
+    var stmt = try db.prepare(query, TypeMappings(1, 1).allUntyped());
     defer stmt.deinit();
 
     _ = try stmt.one(void, .{}, .{ .id = @as(usize, 20) });
@@ -1077,7 +1090,7 @@ test "sqlite: read a single value into bool" {
 
     const query = "SELECT id FROM user WHERE id = ?{usize}";
 
-    var stmt: Statement(.{}, ParsedQuery.from(query)) = try db.prepare(query);
+    var stmt = try db.prepare(query, TypeMappings(1, 1).allUntyped());
     defer stmt.deinit();
 
     const b = try stmt.one(bool, .{}, .{ .id = @as(usize, 20) });
@@ -1090,7 +1103,7 @@ test "sqlite: insert bool and bind bool" {
     try db.init(testing.allocator, .{ .mode = dbMode() });
     try addTestData(&db);
 
-    try db.exec("INSERT INTO article(id, author_id, is_published) VALUES(?{usize}, ?{usize}, ?{bool})", .{
+    try db.exec("INSERT INTO article(id, author_id, is_published) VALUES(?{usize}, ?{usize}, ?{bool})", TypeMappings(0, 3).allUntyped(), .{
         .id = @as(usize, 1),
         .author_id = @as(usize, 20),
         .is_published = true,
@@ -1098,7 +1111,7 @@ test "sqlite: insert bool and bind bool" {
 
     const query = "SELECT id FROM article WHERE is_published = ?{bool}";
 
-    var stmt: Statement(.{}, ParsedQuery.from(query)) = try db.prepare(query);
+    var stmt = try db.prepare(query, TypeMappings(1, 1).allUntyped());
     defer stmt.deinit();
 
     const b = try stmt.one(bool, .{}, .{ .is_published = true });
@@ -1113,7 +1126,7 @@ test "sqlite: statement reset" {
 
     // Add data
 
-    var stmt = try db.prepare("INSERT INTO user(id, name, age, weight) VALUES(?{usize}, ?{[]const u8}, ?{usize}, ?{f32})");
+    var stmt = try db.prepare("INSERT INTO user(id, name, age, weight) VALUES(?{usize}, ?{[]const u8}, ?{usize}, ?{f32})", TypeMappings(0, 4).allUntyped());
     defer stmt.deinit();
 
     const users = &[_]TestUser{
@@ -1141,10 +1154,10 @@ test "sqlite: statement iterator" {
     try addTestData(&db);
 
     // Cleanup first
-    try db.exec("DELETE FROM user", .{});
+    try db.exec("DELETE FROM user", TypeMappings(0, 0){}, .{});
 
     // Add data
-    var stmt = try db.prepare("INSERT INTO user(id, name, age, weight) VALUES(?{usize}, ?{[]const u8}, ?{usize}, ?{f32})");
+    var stmt = try db.prepare("INSERT INTO user(id, name, age, weight) VALUES(?{usize}, ?{[]const u8}, ?{usize}, ?{f32})", TypeMappings(0, 4).allUntyped());
     defer stmt.deinit();
 
     var expected_rows = std.ArrayList(TestUser).init(allocator);
@@ -1163,7 +1176,7 @@ test "sqlite: statement iterator" {
     }
 
     // Get the data with an iterator
-    var stmt2 = try db.prepare("SELECT name, age FROM user");
+    var stmt2 = try db.prepare("SELECT name, age FROM user", TypeMappings(2, 0).allUntyped());
     defer stmt2.deinit();
 
     const Type = struct {
