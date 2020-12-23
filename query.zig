@@ -9,7 +9,12 @@ pub const Blob = struct { data: []const u8 };
 /// Text is used to represent a SQLite TEXT value when binding a parameter or reading a column.
 pub const Text = struct { data: []const u8 };
 
-const BindMarker = union(enum) {
+pub const Column = union(enum) {
+    Typed: type,
+    Untyped: void,
+};
+
+pub const BindMarker = union(enum) {
     Typed: type,
     Untyped: void,
 };
