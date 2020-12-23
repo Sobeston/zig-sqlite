@@ -112,7 +112,7 @@ pub const Db = struct {
             break :blk try std.fmt.bufPrint(&buf, "PRAGMA {}", .{name});
         };
 
-        var stmt = try self.prepare(query, TypeMappings(0, 0){});
+        var stmt = try self.prepare(query, .{});
         defer stmt.deinit();
 
         return try stmt.one(Type, options, .{});
@@ -432,18 +432,22 @@ pub fn Iterator(comptime Type: type, comptime mappings: anytype) type {
         fn readStruct(self: *Self, options: anytype) !Type {
             const type_info = @typeInfo(Type);
 
-            if (type_info.Struct.fields.len != mappings.columns.len) {
-                @compileError("number of column type mappings not equal to number of fields");
+            if (@hasField(@TypeOf(mappings), "columns")) {
+                if (type_info.Struct.fields.len != mappings.columns.len) {
+                    @compileError("number of column type mappings not equal to number of fields");
+                }
             }
 
             var value: Type = undefined;
             inline for (@typeInfo(Type).Struct.fields) |field, _i| {
-                const column_type_mapping = mappings.columns[_i];
-                switch (column_type_mapping) {
-                    .Typed => |typ| if (struct_field.field_type != typ) {
-                        @compileError("value type " ++ @typeName(field.field_type) ++ " is not the required column type " ++ @typeName(typ));
-                    },
-                    .Untyped => {},
+                if (@hasField(@TypeOf(mappings), "columns")) {
+                    const column_type_mapping = mappings.columns[_i];
+                    switch (column_type_mapping) {
+                        .Typed => |typ| if (field.field_type != typ) {
+                            @compileError("value type " ++ @typeName(field.field_type) ++ " is not the required column type " ++ @typeName(typ));
+                        },
+                        .Untyped => {},
+                    }
                 }
 
                 const i = @as(usize, _i);
@@ -577,17 +581,21 @@ pub fn Statement(comptime opts: StatementOptions, comptime query: ParsedQuery, c
             const StructType = @TypeOf(values);
             const StructTypeInfo = @typeInfo(StructType).Struct;
 
-            if (comptime mappings.bind_markers.len != StructTypeInfo.fields.len) {
-                @compileError("number of bind markers not equal to number of fields");
+            if (@hasField(@TypeOf(mappings), "bind_markers")) {
+                if (mappings.bind_markers.len != StructTypeInfo.fields.len) {
+                    @compileError("number of bind markers not equal to number of fields");
+                }
             }
 
             inline for (StructTypeInfo.fields) |struct_field, _i| {
-                const bind_marker = mappings.bind_markers[_i];
-                switch (bind_marker) {
-                    .Typed => |typ| if (struct_field.field_type != typ) {
-                        @compileError("value type " ++ @typeName(struct_field.field_type) ++ " is not the bind marker type " ++ @typeName(typ));
-                    },
-                    .Untyped => {},
+                if (@hasField(@TypeOf(mappings), "bind_markers")) {
+                    const bind_marker = mappings.bind_markers[_i];
+                    switch (bind_marker) {
+                        .Typed => |typ| if (struct_field.field_type != typ) {
+                            @compileError("value type " ++ @typeName(struct_field.field_type) ++ " is not the bind marker type " ++ @typeName(typ));
+                        },
+                        .Untyped => {},
+                    }
                 }
 
                 const i = @as(usize, _i);
@@ -779,11 +787,18 @@ fn addTestData(db: *Db) !void {
 
     // Create the tables
     inline for (AllDDL) |ddl| {
-        try db.exec(ddl, TypeMappings(0, 0){}, .{});
+        try db.exec(ddl, .{}, .{});
     }
 
     for (test_users) |user| {
-        try db.exec("INSERT INTO user(id, name, age, weight) VALUES(?{usize}, ?{[]const u8}, ?{usize}, ?{f32})", TypeMappings(0, 4).allUntyped(), user);
+        try db.exec("INSERT INTO user(id, name, age, weight) VALUES(?{usize}, ?{[]const u8}, ?{usize}, ?{f32})", .{
+            .bind_markers = &[_]BindMarker{
+                BindMarker{ .Typed = usize },
+                BindMarker{ .Typed = []const u8 },
+                BindMarker{ .Typed = usize },
+                BindMarker{ .Typed = f32 },
+            },
+        }, user);
 
         const rows_inserted = db.rowsAffected();
         testing.expectEqual(@as(usize, 1), rows_inserted);
@@ -835,20 +850,34 @@ test "sqlite: statement exec" {
 
     // Test with a Blob struct
     {
-        try db.exec("INSERT INTO user(id, name, age) VALUES(?{usize}, ?{blob}, ?{u32})", TypeMappings(0, 3).allUntyped(), .{
-            .id = @as(usize, 200),
-            .name = Blob{ .data = "hello" },
-            .age = @as(u32, 20),
-        });
+        try db.exec(
+            "INSERT INTO user(id, name, age) VALUES(?{usize}, ?{blob}, ?{u32})",
+            .{
+                .bind_markers = [_]BindMarker{
+                    BindMarker{ .Typed = usize },
+                    BindMarker{ .Typed = Blob },
+                    BindMarker{ .Typed = u32 },
+                },
+            },
+            .{
+                .id = @as(usize, 200),
+                .name = Blob{ .data = "hello" },
+                .age = @as(u32, 20),
+            },
+        );
     }
 
     // Test with a Text struct
     {
-        try db.exec("INSERT INTO user(id, name, age) VALUES(?{usize}, ?{text}, ?{u32})", TypeMappings(0, 3).allUntyped(), .{
-            .id = @as(usize, 201),
-            .name = Text{ .data = "hello" },
-            .age = @as(u32, 20),
-        });
+        try db.exec(
+            "INSERT INTO user(id, name, age) VALUES(?{usize}, ?{text}, ?{u32})",
+            .{},
+            .{
+                .id = @as(usize, 201),
+                .name = Text{ .data = "hello" },
+                .age = @as(u32, 20),
+            },
+        );
     }
 }
 
@@ -860,7 +889,11 @@ test "sqlite: read a single user into a struct" {
     try db.init(testing.allocator, .{ .mode = dbMode() });
     try addTestData(&db);
 
-    var stmt = try db.prepare("SELECT id, name, age, weight FROM user WHERE id = ?{usize}", TypeMappings(4, 1).allUntyped());
+    var stmt = try db.prepare("SELECT id, name, age, weight FROM user WHERE id = ?{usize}", .{
+        .bind_markers = [_]BindMarker{
+            .{ .Typed = usize },
+        },
+    });
     defer stmt.deinit();
 
     var rows = try stmt.all(
@@ -883,7 +916,7 @@ test "sqlite: read a single user into a struct" {
                 age: usize,
             },
             "SELECT id, name, age FROM user WHERE id = ?{usize}",
-            TypeMappings(3, 1).allUntyped(),
+            .{},
             .{ .allocator = &arena.allocator },
             .{@as(usize, 20)},
         );
@@ -904,7 +937,14 @@ test "sqlite: read all users into a struct" {
     try db.init(testing.allocator, .{ .mode = dbMode() });
     try addTestData(&db);
 
-    var stmt = try db.prepare("SELECT id, name, age, weight FROM user", TypeMappings(4, 0).allUntyped());
+    var stmt = try db.prepare("SELECT id, name, age, weight FROM user", .{
+        .columns = [_]Column{
+            .{ .Typed = usize },
+            .{ .Untyped = {} },
+            .{ .Typed = usize },
+            .{ .Typed = f32 },
+        },
+    });
     defer stmt.deinit();
 
     var rows = try stmt.all(
@@ -929,7 +969,19 @@ test "sqlite: read in an anonymous struct" {
     try db.init(testing.allocator, .{ .mode = dbMode() });
     try addTestData(&db);
 
-    var stmt = try db.prepare("SELECT id, name, name, age, id, weight FROM user WHERE id = ?{usize}", TypeMappings(6, 1).allUntyped());
+    var stmt = try db.prepare("SELECT id, name, name, age, id, weight FROM user WHERE id = ?{usize}", .{
+        .columns = [_]Column{
+            .{ .Typed = usize },
+            .{ .Untyped = {} },
+            .{ .Untyped = {} },
+            .{ .Typed = usize },
+            .{ .Typed = bool },
+            .{ .Typed = f64 },
+        },
+        .bind_markers = [_]BindMarker{
+            .{ .Typed = usize },
+        },
+    });
     defer stmt.deinit();
 
     var row = try stmt.one(
@@ -963,7 +1015,11 @@ test "sqlite: read in a Text struct" {
     try db.init(testing.allocator, .{ .mode = dbMode() });
     try addTestData(&db);
 
-    var stmt = try db.prepare("SELECT id, name, age FROM user WHERE id = ?{usize}", TypeMappings(3, 1).allUntyped());
+    var stmt = try db.prepare("SELECT id, name, age FROM user WHERE id = ?{usize}", .{
+        .bind_markers = [_]BindMarker{
+            .{ .Typed = usize },
+        },
+    });
     defer stmt.deinit();
 
     var row = try stmt.one(
@@ -1010,7 +1066,11 @@ test "sqlite: read a single text value" {
     inline for (types) |typ| {
         const query = "SELECT name FROM user WHERE id = ?{usize}";
 
-        var stmt = try db.prepare(query, TypeMappings(1, 1).allUntyped());
+        var stmt = try db.prepare(query, .{
+            .bind_markers = [_]BindMarker{
+                .{ .Typed = usize },
+            },
+        });
         defer stmt.deinit();
 
         const name = try stmt.one(
@@ -1060,7 +1120,11 @@ test "sqlite: read a single integer value" {
     inline for (types) |typ| {
         const query = "SELECT age FROM user WHERE id = ?{usize}";
 
-        var stmt = try db.prepare(query, TypeMappings(1, 1).allUntyped());
+        var stmt = try db.prepare(query, .{
+            .bind_markers = [_]BindMarker{
+                .{ .Typed = usize },
+            },
+        });
         defer stmt.deinit();
 
         var age = try stmt.one(typ, .{}, .{ .id = @as(usize, 20) });
@@ -1077,7 +1141,11 @@ test "sqlite: read a single value into void" {
 
     const query = "SELECT age FROM user WHERE id = ?{usize}";
 
-    var stmt = try db.prepare(query, TypeMappings(1, 1).allUntyped());
+    var stmt = try db.prepare(query, .{
+        .bind_markers = [_]BindMarker{
+            .{ .Typed = usize },
+        },
+    });
     defer stmt.deinit();
 
     _ = try stmt.one(void, .{}, .{ .id = @as(usize, 20) });
@@ -1090,7 +1158,11 @@ test "sqlite: read a single value into bool" {
 
     const query = "SELECT id FROM user WHERE id = ?{usize}";
 
-    var stmt = try db.prepare(query, TypeMappings(1, 1).allUntyped());
+    var stmt = try db.prepare(query, .{
+        .bind_markers = [_]BindMarker{
+            .{ .Typed = usize },
+        },
+    });
     defer stmt.deinit();
 
     const b = try stmt.one(bool, .{}, .{ .id = @as(usize, 20) });
@@ -1103,15 +1175,32 @@ test "sqlite: insert bool and bind bool" {
     try db.init(testing.allocator, .{ .mode = dbMode() });
     try addTestData(&db);
 
-    try db.exec("INSERT INTO article(id, author_id, is_published) VALUES(?{usize}, ?{usize}, ?{bool})", TypeMappings(0, 3).allUntyped(), .{
-        .id = @as(usize, 1),
-        .author_id = @as(usize, 20),
-        .is_published = true,
-    });
+    try db.exec(
+        "INSERT INTO article(id, author_id, is_published) VALUES(?{usize}, ?{usize}, ?{bool})",
+        .{
+            .bind_markers = [_]BindMarker{
+                .{ .Typed = usize },
+                .{ .Typed = usize },
+                .{ .Typed = bool },
+            },
+        },
+        .{
+            .id = @as(usize, 1),
+            .author_id = @as(usize, 20),
+            .is_published = true,
+        },
+    );
 
     const query = "SELECT id FROM article WHERE is_published = ?{bool}";
 
-    var stmt = try db.prepare(query, TypeMappings(1, 1).allUntyped());
+    var stmt = try db.prepare(query, .{
+        .columns = [_]Column{
+            .{ .Typed = bool },
+        },
+        .bind_markers = [_]BindMarker{
+            .{ .Typed = bool },
+        },
+    });
     defer stmt.deinit();
 
     const b = try stmt.one(bool, .{}, .{ .is_published = true });
@@ -1126,7 +1215,14 @@ test "sqlite: statement reset" {
 
     // Add data
 
-    var stmt = try db.prepare("INSERT INTO user(id, name, age, weight) VALUES(?{usize}, ?{[]const u8}, ?{usize}, ?{f32})", TypeMappings(0, 4).allUntyped());
+    var stmt = try db.prepare("INSERT INTO user(id, name, age, weight) VALUES(?{usize}, ?{[]const u8}, ?{usize}, ?{f32})", .{
+        .bind_markers = [_]BindMarker{
+            .{ .Typed = usize },
+            .{ .Untyped = {} },
+            .{ .Typed = usize },
+            .{ .Typed = f32 },
+        },
+    });
     defer stmt.deinit();
 
     const users = &[_]TestUser{
@@ -1154,10 +1250,17 @@ test "sqlite: statement iterator" {
     try addTestData(&db);
 
     // Cleanup first
-    try db.exec("DELETE FROM user", TypeMappings(0, 0){}, .{});
+    try db.exec("DELETE FROM user", .{}, .{});
 
     // Add data
-    var stmt = try db.prepare("INSERT INTO user(id, name, age, weight) VALUES(?{usize}, ?{[]const u8}, ?{usize}, ?{f32})", TypeMappings(0, 4).allUntyped());
+    var stmt = try db.prepare("INSERT INTO user(id, name, age, weight) VALUES(?{usize}, ?{[]const u8}, ?{usize}, ?{f32})", .{
+        .bind_markers = [_]BindMarker{
+            .{ .Typed = usize },
+            .{ .Untyped = {} },
+            .{ .Typed = usize },
+            .{ .Typed = f32 },
+        },
+    });
     defer stmt.deinit();
 
     var expected_rows = std.ArrayList(TestUser).init(allocator);
@@ -1176,7 +1279,7 @@ test "sqlite: statement iterator" {
     }
 
     // Get the data with an iterator
-    var stmt2 = try db.prepare("SELECT name, age FROM user", TypeMappings(2, 0).allUntyped());
+    var stmt2 = try db.prepare("SELECT name, age FROM user", .{});
     defer stmt2.deinit();
 
     const Type = struct {

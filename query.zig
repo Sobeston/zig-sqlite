@@ -19,22 +19,6 @@ pub const BindMarker = union(enum) {
     Untyped: void,
 };
 
-pub fn TypeMappings(comptime nb_columns: comptime_int, comptime nb_bind_markers: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        columns: [nb_columns]Column = [_]Column{},
-        bind_markers: [nb_bind_markers]BindMarker = [_]BindMarker{},
-
-        pub fn allUntyped() Self {
-            return Self{
-                .columns = [_]Column{Column{ .Untyped = {} }} ** nb_columns,
-                .bind_markers = [_]BindMarker{BindMarker{ .Untyped = {} }} ** nb_bind_markers,
-            };
-        }
-    };
-}
-
 pub const ParsedQuery = struct {
     const Self = @This();
 
