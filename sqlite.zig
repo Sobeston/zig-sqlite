@@ -13,6 +13,64 @@ usingnamespace @import("error.zig");
 
 const logger = std.log.scoped(.sqlite);
 
+pub const Blob = struct {
+    const Self = @This();
+
+    pub const OpenFlags = struct {
+        read: bool = true,
+        write: bool = false,
+    };
+
+    pub const Reader = io.Reader(Self, ReadError, read);
+
+    pub const DatabaseName = union(enum) {
+        main,
+        temp,
+        attached: [:0]const u8,
+
+        fn toString(self: @This()) [:0]const u8 {
+            return switch (self) {
+                .main => "main",
+                .temp => "temp",
+                .attached => |name| name,
+            };
+        }
+    };
+
+    data: []const u8,
+    handle: *c.sqlite3_blob = undefined,
+
+    pub fn reader(self: *Self) Reader {
+        unreachable;
+    }
+
+    fn open(db: *c.sqlite3, db_name: DatabaseName, table: [:0]const u8, column: [:0]const u8, row: i64, comptime flags: OpenFlags) !Blob {
+        comptime if (!flags.read and !flags.write) {
+            @compileError("must open a blob for either read, write or both");
+        };
+
+        const open_flags: c_int = if (flags.write) 1 else 0;
+
+        var blob: Blob = undefined;
+        const result = c.sqlite3_blob_open(
+            db,
+            db_name.toString(),
+            table,
+            column,
+            row,
+            open_flags,
+            @ptrCast([*c]?*c.sqlite3_blob, &blob.handle),
+        );
+        if (result == c.SQLITE_MISUSE) debug.panic("sqlite misuse while opening a blob", .{});
+        if (result != c.SQLITE_OK) {
+            logger.warn("unable to open blob, result: {}", .{result});
+            return error.CannotOpenBlob;
+        }
+
+        unreachable;
+    }
+};
+
 /// ThreadingMode controls the threading mode used by SQLite.
 ///
 /// See https://sqlite.org/threadsafe.html
@@ -248,6 +306,10 @@ pub const Db = struct {
     /// rowsAffected returns the number of rows affected by the last statement executed.
     pub fn rowsAffected(self: *Self) usize {
         return @intCast(usize, c.sqlite3_changes(self.db));
+    }
+
+    pub fn openBlob(self: *Self, db_name: Blob.DatabaseName, table: [:0]const u8, column: [:0]const u8, row: i64, comptime flags: Blob.OpenFlags) !Blob {
+        return Blob.open(self.db, db_name, table, column, row, flags);
     }
 };
 
@@ -1446,6 +1508,30 @@ test "sqlite: statement iterator" {
             testing.expectEqual(exp_row.age, row.age);
         }
     }
+}
+
+test "sqlite: blob open" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var allocator = &arena.allocator;
+
+    var db: Db = undefined;
+    try db.init(initOptions());
+
+    // Insert a test blob
+    try db.exec("CREATE TABLE test_blob(id integer primary key, data blob)", .{});
+
+    const blobData = "\xDE\xAD\xBE\xEFabcdefghijklmnopqrstuvwxyz0123456789";
+
+    try db.exec("INSERT INTO test_blob(id, data) VALUES(?, ?)", .{
+        .id = 340,
+        .data = Blob{ .data = blobData },
+    });
+
+    // Open the blob for reading
+
+    const blob = try db.openBlob(.main, "test_blob", "data", 1, .{});
+    _ = blob;
 }
 
 test "sqlite: failing open" {
