@@ -46,6 +46,8 @@ pub const InitOptions = struct {
     ///
     /// Defaults to Serialized.
     threading_mode: ThreadingMode = .Serialized,
+
+    diags: ?*Diagnostics = null,
 };
 
 /// DetailedError contains a SQLite error code and error message.
@@ -108,6 +110,9 @@ pub const Db = struct {
 
     /// init creates a database with the provided `mode`.
     pub fn init(self: *Self, options: InitOptions) !void {
+        var dummy_diags = Diagnostics{};
+        var diags = options.diags orelse &dummy_diags;
+
         // Validate the threading mode
         if (options.threading_mode != .SingleThread and !isThreadSafe()) {
             return error.CannotUseSingleThreadedSQLite;
@@ -132,6 +137,11 @@ pub const Db = struct {
                 var db: ?*c.sqlite3 = undefined;
                 const result = c.sqlite3_open_v2(path, &db, flags, null);
                 if (result != c.SQLITE_OK or db == null) {
+                    if (db) |v| {
+                        diags.err = getLastDetailedErrorFromDb(v);
+                    } else {
+                        diags.err = getDetailedErrorFromResultCode(result);
+                    }
                     return errorFromResultCode(result);
                 }
 
@@ -145,6 +155,11 @@ pub const Db = struct {
                 var db: ?*c.sqlite3 = undefined;
                 const result = c.sqlite3_open_v2(":memory:", &db, flags, null);
                 if (result != c.SQLITE_OK or db == null) {
+                    if (db) |v| {
+                        diags.err = getLastDetailedErrorFromDb(v);
+                    } else {
+                        diags.err = getDetailedErrorFromResultCode(result);
+                    }
                     return errorFromResultCode(result);
                 }
 
