@@ -219,7 +219,7 @@ pub const Db = struct {
         comptime var buf: [1024]u8 = undefined;
         comptime var query = getPragmaQuery(&buf, name, arg);
 
-        var stmt = try self.prepare(query);
+        var stmt = try self.prepareWithDiags(query, options);
         defer stmt.deinit();
 
         return try stmt.one(Type, options, .{});
@@ -233,17 +233,24 @@ pub const Db = struct {
     }
 
     /// one is a convenience function which prepares a statement and reads a single row from the result set.
-    pub fn one(self: *Self, comptime Type: type, comptime query: []const u8, options: anytype, values: anytype) !?Type {
-        var stmt = try self.prepare(query);
+    pub fn one(self: *Self, comptime Type: type, comptime query: []const u8, options: QueryOptions, values: anytype) !?Type {
+        var stmt = try self.prepareWithDiags(query, options);
         defer stmt.deinit();
         return try stmt.one(Type, options, values);
     }
 
     /// oneAlloc is like `one` but can allocate memory.
-    pub fn oneAlloc(self: *Self, comptime Type: type, allocator: *mem.Allocator, comptime query: []const u8, options: anytype, values: anytype) !?Type {
-        var stmt = try self.prepare(query);
+    pub fn oneAlloc(self: *Self, comptime Type: type, allocator: *mem.Allocator, comptime query: []const u8, options: QueryOptions, values: anytype) !?Type {
+        var stmt = try self.prepareWithDiags(query, options);
         defer stmt.deinit();
         return try stmt.oneAlloc(Type, allocator, options, values);
+    }
+
+    /// prepareWithDiags is like `prepare` but takes an additional diagnostics argument which will be used in case of failures.
+    pub fn prepareWithDiags(self: *Self, comptime query: []const u8, options: QueryOptions) !Statement(.{}, ParsedQuery.from(query)) {
+        @setEvalBranchQuota(10000);
+        const parsed_query = ParsedQuery.from(query);
+        return Statement(.{}, comptime parsed_query).prepare(self, options, 0);
     }
 
     /// prepare prepares a statement for the `query` provided.
@@ -259,16 +266,21 @@ pub const Db = struct {
     /// The statement returned is only compatible with the number of bind markers in the input query.
     /// This is done because we type check the bind parameters when executing the statement later.
     ///
+    /// If you want additional error information in case of failures, use `prepareWithDiags`.
     pub fn prepare(self: *Self, comptime query: []const u8) !Statement(.{}, ParsedQuery.from(query)) {
         @setEvalBranchQuota(10000);
         const parsed_query = ParsedQuery.from(query);
-        return Statement(.{}, comptime parsed_query).prepare(self, 0);
+        return Statement(.{}, comptime parsed_query).prepare(self, .{}, 0);
     }
 
     /// rowsAffected returns the number of rows affected by the last statement executed.
     pub fn rowsAffected(self: *Self) usize {
         return @intCast(usize, c.sqlite3_changes(self.db));
     }
+};
+
+pub const QueryOptions = struct {
+    diags: ?*Diagnostics = null,
 };
 
 /// Iterator allows iterating over a result set.
@@ -306,12 +318,16 @@ pub fn Iterator(comptime Type: type) type {
         // If it returns null iterating is done.
         //
         // This cannot allocate memory. If you need to read TEXT or BLOB columns you need to use arrays or alternatively call nextAlloc.
-        pub fn next(self: *Self, options: anytype) !?Type {
+        pub fn next(self: *Self, options: QueryOptions) !?Type {
+            var dummy_diags = Diagnostics{};
+            var diags = options.diags orelse &dummy_diags;
+
             var result = c.sqlite3_step(self.stmt);
             if (result == c.SQLITE_DONE) {
                 return null;
             }
             if (result != c.SQLITE_ROW) {
+                diags.err = getLastDetailedErrorFromDb(self.db);
                 return errorFromResultCode(result);
             }
 
@@ -346,12 +362,16 @@ pub fn Iterator(comptime Type: type) type {
         }
 
         // nextAlloc is like `next` but can allocate memory.
-        pub fn nextAlloc(self: *Self, allocator: *mem.Allocator, options: anytype) !?Type {
+        pub fn nextAlloc(self: *Self, allocator: *mem.Allocator, options: QueryOptions) !?Type {
+            var dummy_diags = Diagnostics{};
+            var diags = options.diags orelse &dummy_diags;
+
             var result = c.sqlite3_step(self.stmt);
             if (result == c.SQLITE_DONE) {
                 return null;
             }
             if (result != c.SQLITE_ROW) {
+                diags.err = getLastDetailedErrorFromDb(self.db);
                 return errorFromResultCode(result);
             }
 
@@ -656,7 +676,10 @@ pub fn Statement(comptime opts: StatementOptions, comptime query: ParsedQuery) t
         db: *c.sqlite3,
         stmt: *c.sqlite3_stmt,
 
-        fn prepare(db: *Db, flags: c_uint) !Self {
+        fn prepare(db: *Db, options: QueryOptions, flags: c_uint) !Self {
+            var dummy_diags = Diagnostics{};
+            var diags = options.diags orelse &dummy_diags;
+
             var stmt = blk: {
                 const real_query = query.getQuery();
 
@@ -1490,7 +1513,9 @@ test "sqlite: failing prepare statement" {
     var db: Db = undefined;
     try db.init(initOptions());
 
-    const result = db.prepare("SELECT id FROM foobar");
+    var diags: Diagnostics = undefined;
+
+    const result = db.prepareWithDiags("SELECT id FROM foobar", .{ .diags = &diags });
     testing.expectError(error.SQLiteError, result);
 
     const detailed_err = db.getDetailedError();
