@@ -26,6 +26,11 @@ pub const ThreadingMode = enum {
     Serialized,
 };
 
+pub const Diagnostics = struct {
+    message: []const u8 = "",
+    err: ?DetailedError = null,
+};
+
 pub const InitOptions = struct {
     /// mode controls how the database is opened.
     ///
