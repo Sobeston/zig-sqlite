@@ -279,6 +279,7 @@ pub fn Iterator(comptime Type: type) type {
 
         const TypeInfo = @typeInfo(Type);
 
+        db: *c.sqlite3,
         stmt: *c.sqlite3_stmt,
 
         // next scans the next row using the prepared statement.
@@ -632,6 +633,7 @@ pub fn Statement(comptime opts: StatementOptions, comptime query: ParsedQuery) t
     return struct {
         const Self = @This();
 
+        db: *c.sqlite3,
         stmt: *c.sqlite3_stmt,
 
         fn prepare(db: *Db, flags: c_uint) !Self {
@@ -654,6 +656,7 @@ pub fn Statement(comptime opts: StatementOptions, comptime query: ParsedQuery) t
             };
 
             return Self{
+                .db = db.db,
                 .stmt = stmt,
             };
         }
@@ -792,6 +795,7 @@ pub fn Statement(comptime opts: StatementOptions, comptime query: ParsedQuery) t
             self.bind(values);
 
             var res: Iterator(Type) = undefined;
+            res.db = self.db;
             res.stmt = self.stmt;
 
             return res;
