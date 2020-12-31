@@ -1473,12 +1473,17 @@ test "sqlite: statement iterator" {
 }
 
 test "sqlite: failing open" {
+    var diags: Diagnostics = undefined;
+
     var db: Db = undefined;
     const res = db.init(.{
+        .diags = &diags,
         .open_flags = .{},
         .mode = .{ .File = "/tmp/not_existing.db" },
     });
     testing.expectError(error.SQLiteCantOpen, res);
+    testing.expectEqual(@as(usize, 14), diags.err.?.code);
+    testing.expectEqualStrings("unable to open database file", diags.err.?.message);
 }
 
 test "sqlite: failing prepare statement" {
