@@ -82,6 +82,17 @@ defer stmt.deinit();
 
 The `Db.prepare` method takes a `comptime` query string.
 
+### Diagnostics
+
+If you want failure diagnostics you can use `prepareWithDiags` like this:
+
+```zig
+var diags: sqlite.Diagnostics = undefined;
+
+var stmt = try db.prepareWithDiags(query, .{ .diags = &diags });
+defer stmt.deinit();
+```
+
 ## Executing a statement
 
 For queries which do not return data (`INSERT`, `UPDATE`) you can use the `exec` method:
